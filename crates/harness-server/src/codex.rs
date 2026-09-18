@@ -10,7 +10,7 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 
-use codex_app_server_protocol::UserInput;
+use codex_app_server_protocol::{ModelListResponse, UserInput};
 use serde_json::{Value, json};
 
 use crate::otel::{TurnStatus as TelemetryTurnStatus, TurnTelemetry};
@@ -456,7 +456,24 @@ fn run_codex_user_turn<W: Write>(
             }
             TurnTermination::CyberPolicyError { withheld } => {
                 let current_model = params.get("model").and_then(Value::as_str);
-                if cyber_fallback_used || current_model == Some(CYBER_POLICY_FALLBACK_MODEL) {
+                let fallback_available = !cyber_fallback_used
+                    && current_model != Some(CYBER_POLICY_FALLBACK_MODEL)
+                    && match codex.model_is_available(
+                        stdout,
+                        request_id,
+                        CYBER_POLICY_FALLBACK_MODEL,
+                        traceparent,
+                    ) {
+                        Ok(available) => available,
+                        Err(error) => {
+                            eprintln!(
+                                "could not verify Codex fallback model \
+                                 `{CYBER_POLICY_FALLBACK_MODEL}`: {error:#}"
+                            );
+                            false
+                        }
+                    };
+                if !fallback_available {
                     for value in &withheld {
                         telemetry.observe_wire_value(value);
                         write_value(stdout, value)?;
@@ -659,6 +676,48 @@ impl CodexJsonRpcChild {
             if notification_method(&value).is_some() {
                 write_value(stdout, &value)?;
             }
+        }
+    }
+
+    fn model_is_available<W: Write>(
+        &mut self,
+        stdout: &mut W,
+        request_id: &mut i64,
+        model: &str,
+        traceparent: Option<&str>,
+    ) -> Result<bool> {
+        let mut cursor = None;
+        let mut seen_cursors = HashSet::new();
+        loop {
+            let id = next_request_id(request_id);
+            self.send_request(
+                id,
+                "model/list",
+                json!({
+                    "cursor": cursor,
+                    "limit": 100,
+                    "includeHidden": true,
+                }),
+                traceparent,
+            )?;
+            let result = self.read_response_or_forward(id, stdout)?;
+            let response: ModelListResponse = serde_json::from_value(result)?;
+            if response
+                .data
+                .iter()
+                .any(|candidate| candidate.model == model)
+            {
+                return Ok(true);
+            }
+            let Some(next_cursor) = response.next_cursor else {
+                return Ok(false);
+            };
+            if !seen_cursors.insert(next_cursor.clone()) {
+                return Err(HarnessServerError::Protocol(
+                    "Codex model/list returned a repeated cursor".to_string(),
+                ));
+            }
+            cursor = Some(next_cursor);
         }
     }
 
