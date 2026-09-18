@@ -93,7 +93,7 @@ created. Changing a default does not rewrite existing principals.
 
 | Env var | Set from | Controls |
 | --- | --- | --- |
-| `CENTAUR_DEFAULT_HARNESS` | `api.defaultHarness`. | Default harness for new executions. |
+| `CENTAUR_DEFAULT_HARNESS` | `sandbox.harnessEngine`. | Default harness for new sessions that do not explicitly request one. Existing sessions keep their pinned harness. |
 | `CENTAUR_ENVIRONMENT` | `api.extraEnv` or deployment env. | Environment label in traces and telemetry. |
 | `CENTAUR_LOG_LEVEL`, `LOG_LEVEL` | Helm sets `CENTAUR_LOG_LEVEL=info`; override in `api.extraEnv`. | API log level. |
 | `CENTAUR_SERVICE_NAME` | `api.extraEnv`. | Default API log `service` field. |
