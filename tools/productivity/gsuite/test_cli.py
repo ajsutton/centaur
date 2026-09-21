@@ -194,6 +194,25 @@ def test_drive_list_full_text_flag_is_passed_to_client(monkeypatch):
             "full_text": True,
         }
     ]
+    assert "file-123" in result.output
+
+
+def test_analytics_sites_outputs_json(monkeypatch):
+    from gsuite import analytics_properties
+
+    monkeypatch.setattr(
+        analytics_properties,
+        "PROPERTY_MAPPINGS",
+        {"example.com": "123", "example": "123", "other.com": "456"},
+    )
+
+    result = runner.invoke(app, ["analytics", "sites", "--json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == [
+        {"property_id": "123", "sites": ["example", "example.com"]},
+        {"property_id": "456", "sites": ["other.com"]},
+    ]
 
 
 def test_docs_bullets_command_prints_verification_summary(monkeypatch):
