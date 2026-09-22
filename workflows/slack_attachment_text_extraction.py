@@ -68,10 +68,6 @@ class UnsupportedAttachment(ValueError):
         self.metadata = metadata or {}
 
 
-class ExtractionFailed(RuntimeError):
-    """A parser failed unexpectedly and should not be retried."""
-
-
 def _configured_positive_int(
     explicit: int | None,
     env_name: str,
@@ -313,13 +309,6 @@ async def _load_candidates(
     )
 
 
-def _attachment_bytes(row: Any) -> tuple[bytes, str]:
-    content = row["content_bytes"]
-    if content is None:
-        raise UnsupportedAttachment("content_not_downloaded")
-    return bytes(content), str(row["mimetype"] or "")
-
-
 async def _store_result(
     pool,
     *,
@@ -364,71 +353,6 @@ async def _store_result(
     )
 
 
-def _extract_attachment(
-    data: bytes,
-    *,
-    filename: str,
-    declared_mime_type: str,
-    max_expanded_bytes: int,
-    max_pages: int,
-    max_characters: int,
-) -> tuple[str, dict[str, Any]]:
-    try:
-        return extract_text(
-            data,
-            filename=filename,
-            declared_mime_type=declared_mime_type,
-            max_expanded_bytes=max_expanded_bytes,
-            max_pages=max_pages,
-            max_characters=max_characters,
-        )
-    except UnsupportedAttachment:
-        raise
-    # Third-party parsers expose unrelated exception hierarchies. Normalize
-    # them here so orchestration only handles extraction outcomes.
-    except Exception as error:
-        raise ExtractionFailed(f"{type(error).__name__}: {error}") from error
-
-
-async def _record_unsupported(
-    pool,
-    row: Any,
-    *,
-    source_hash: str | None,
-    extractor_version: str,
-    error: UnsupportedAttachment,
-) -> dict[str, Any]:
-    await _store_result(
-        pool,
-        row=row,
-        source_content_sha256=source_hash,
-        extractor_version=extractor_version,
-        status="unsupported",
-        metadata=error.metadata,
-        last_error=error.reason,
-    )
-    return {"status": "unsupported", "reason": error.reason}
-
-
-async def _record_failure(
-    pool,
-    row: Any,
-    *,
-    source_hash: str | None,
-    extractor_version: str,
-    error: ExtractionFailed,
-) -> dict[str, Any]:
-    await _store_result(
-        pool,
-        row=row,
-        source_content_sha256=source_hash,
-        extractor_version=extractor_version,
-        status="failed",
-        last_error=str(error),
-    )
-    return {"status": "failed", "error_type": type(error).__name__}
-
-
 async def _extract_and_store(
     pool,
     row: Any,
@@ -438,34 +362,40 @@ async def _extract_and_store(
     max_pages: int,
     max_characters: int,
 ) -> dict[str, Any]:
-    source_hash = str(row["content_sha256"] or "") or None
+    data = bytes(row["content_bytes"])
+    source_hash = hashlib.sha256(data).hexdigest()
     try:
-        data, effective_mime_type = _attachment_bytes(row)
-        source_hash = hashlib.sha256(data).hexdigest()
-        text, metadata = _extract_attachment(
+        text, metadata = extract_text(
             data,
             filename=str(row["name"] or ""),
-            declared_mime_type=effective_mime_type,
+            declared_mime_type=str(row["mimetype"] or ""),
             max_expanded_bytes=max_expanded_bytes,
             max_pages=max_pages,
             max_characters=max_characters,
         )
     except UnsupportedAttachment as error:
-        return await _record_unsupported(
+        await _store_result(
             pool,
-            row,
-            source_hash=source_hash,
+            row=row,
+            source_content_sha256=source_hash,
             extractor_version=extractor_version,
-            error=error,
+            status="unsupported",
+            metadata=error.metadata,
+            last_error=error.reason,
         )
-    except ExtractionFailed as error:
-        return await _record_failure(
+        return {"status": "unsupported", "reason": error.reason}
+    # Third-party parsers expose unrelated exception hierarchies. Persist their
+    # failures so a malformed attachment does not block the remaining batch.
+    except Exception as error:  # noqa: BLE001
+        await _store_result(
             pool,
-            row,
-            source_hash=source_hash,
+            row=row,
+            source_content_sha256=source_hash,
             extractor_version=extractor_version,
-            error=error,
+            status="failed",
+            last_error=f"{type(error).__name__}: {error}",
         )
+        return {"status": "failed", "error_type": type(error).__name__}
 
     await _store_result(
         pool,

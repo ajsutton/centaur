@@ -22,9 +22,6 @@ create table if not exists slack_attachment_text_extractions (
         on delete cascade
 );
 
-create index if not exists idx_slack_attachment_text_extractions_version
-    on slack_attachment_text_extractions (extractor_version, updated_at);
-
 grant select on slack_attachment_text_extractions
     to centaur_slack_reader, centaur_readonly;
 

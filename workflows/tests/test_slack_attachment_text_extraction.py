@@ -149,17 +149,6 @@ def test_extracts_pptx_slide_text_and_notes():
     assert metadata["slide_count"] == 1
 
 
-def test_attachment_bytes_requires_downloaded_content():
-    extraction = _load()
-
-    with pytest.raises(
-        extraction.UnsupportedAttachment, match="content_not_downloaded"
-    ):
-        extraction._attachment_bytes(
-            {"content_bytes": None, "mimetype": "application/pdf"}
-        )
-
-
 class FakePool:
     def __init__(self, rows):
         self.rows = rows
