@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import hashlib
 import io
 import os
@@ -10,6 +11,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import PurePath
 from typing import Any
+from urllib import error as urllib_error
 from urllib.parse import urlsplit
 
 from api.runtime_control import canonical_json
@@ -26,6 +28,9 @@ DEFAULT_MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 DEFAULT_MAX_EXPANDED_BYTES = 250 * 1024 * 1024
 DEFAULT_MAX_PAGES = 250
 DEFAULT_MAX_CHARACTERS = 2_000_000
+DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_RETRY_BASE_SECONDS = 60
+DEFAULT_RETRY_MAX_SECONDS = 60 * 60
 
 PDF_MIME_TYPE = "application/pdf"
 DOCX_MIME_TYPE = (
@@ -70,6 +75,10 @@ class UnsupportedAttachment(ValueError):
         super().__init__(reason)
         self.reason = reason
         self.metadata = metadata or {}
+
+
+class RetryableDownloadError(RuntimeError):
+    """A Slack file download failed in a way that may succeed later."""
 
 
 def _configured_positive_int(
@@ -286,13 +295,21 @@ def extract_text(
 
 
 async def _load_candidates(
-    pool, *, extractor_version: str, batch_size: int
+    pool,
+    *,
+    extractor_version: str,
+    batch_size: int,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
 ) -> list[Any]:
     return list(
         await pool.fetch(
             "SELECT a.channel_id, a.message_ts, a.slack_file_id, a.name, a.mimetype, "
             "a.filetype, a.size_bytes, a.url_private, a.download_status, "
-            "a.content_sha256, a.content_bytes, a.updated_at "
+            "a.content_sha256, a.content_bytes, a.updated_at, "
+            "CASE WHEN e.extractor_version = $4 "
+            "  AND (a.content_sha256 IS NULL "
+            "    OR e.source_content_sha256 = a.content_sha256) "
+            "THEN COALESCE(e.attempt_count, 0) ELSE 0 END AS attempt_count "
             "FROM slack_sync_message_attachments a "
             "LEFT JOIN slack_attachment_text_extractions e "
             "ON e.channel_id = a.channel_id "
@@ -307,19 +324,23 @@ async def _load_candidates(
             "AND (e.extraction_id IS NULL "
             "  OR e.extractor_version IS DISTINCT FROM $4 "
             "  OR (a.content_sha256 IS NOT NULL "
-            "    AND e.source_content_sha256 IS DISTINCT FROM a.content_sha256)) "
+            "    AND e.source_content_sha256 IS DISTINCT FROM a.content_sha256) "
+            "  OR (e.status = 'failed' AND e.attempt_count < $5 "
+            "    AND (e.next_attempt_at IS NULL OR e.next_attempt_at <= NOW()))) "
             "ORDER BY a.updated_at, a.channel_id, a.message_ts, a.slack_file_id "
-            "LIMIT $5",
+            "LIMIT $6",
             PDF_MIME_TYPE,
             DOCX_MIME_TYPE,
             PPTX_MIME_TYPE,
             extractor_version,
+            max_attempts,
             batch_size,
         )
     )
 
 
-async def _attachment_bytes(row: Any, *, max_download_bytes: int) -> bytes:
+async def _attachment_bytes(row: Any, *, max_download_bytes: int) -> tuple[bytes, str]:
+    declared_mime_type = str(row["mimetype"] or "")
     stored = row["content_bytes"]
     if stored is not None:
         data = bytes(stored)
@@ -328,7 +349,7 @@ async def _attachment_bytes(row: Any, *, max_download_bytes: int) -> bytes:
                 "file_too_large",
                 {"size_bytes": len(data), "max_download_bytes": max_download_bytes},
             )
-        return data
+        return data, declared_mime_type
 
     size_bytes = int(row["size_bytes"] or 0)
     if size_bytes > max_download_bytes:
@@ -343,12 +364,33 @@ async def _attachment_bytes(row: Any, *, max_download_bytes: int) -> bytes:
     if parsed_url.scheme != "https" or parsed_url.hostname != "files.slack.com":
         raise UnsupportedAttachment("invalid_download_url")
     downloader = _slack_client()
-    _response_mime_type, data = await asyncio.to_thread(
-        downloader.download_file_bytes,
-        url,
-        max_bytes=max_download_bytes,
-    )
-    return data
+    try:
+        response_mime_type, data = await asyncio.to_thread(
+            downloader.download_file_bytes,
+            url,
+            max_bytes=max_download_bytes,
+        )
+    except ValueError as error:
+        raise UnsupportedAttachment(
+            "file_too_large",
+            {"max_download_bytes": max_download_bytes},
+        ) from error
+
+    response_mime_type = str(response_mime_type or "").lower().split(";", 1)[0]
+    suffix = _suffix(str(row["name"] or ""))
+    declared_base_type = declared_mime_type.lower().split(";", 1)[0]
+    binary_document = suffix in {".pdf", ".docx", ".pptx"} or declared_base_type in {
+        PDF_MIME_TYPE,
+        DOCX_MIME_TYPE,
+        PPTX_MIME_TYPE,
+    }
+    if response_mime_type in {"text/html", "application/json"} or (
+        binary_document and response_mime_type.startswith("text/")
+    ):
+        raise RetryableDownloadError(
+            f"unexpected Slack file content type: {response_mime_type}"
+        )
+    return data, response_mime_type or declared_mime_type
 
 
 async def _store_result(
@@ -360,21 +402,34 @@ async def _store_result(
     status: str,
     text_content: str = "",
     metadata: dict[str, Any] | None = None,
+    attempt_count: int = 0,
+    next_attempt_at: dt.datetime | None = None,
     last_error: str = "",
 ) -> None:
+    # Keep the extraction and the source-row freshness signal atomic. The
+    # company-context attachment projection checkpoints the source updated_at.
     await pool.execute(
-        "INSERT INTO slack_attachment_text_extractions ("
-        "channel_id, message_ts, slack_file_id, source_content_sha256, "
-        "extractor_version, status, text_content, metadata, last_error"
-        ") VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9) "
-        "ON CONFLICT (channel_id, message_ts, slack_file_id) DO UPDATE SET "
-        "source_content_sha256 = EXCLUDED.source_content_sha256, "
-        "extractor_version = EXCLUDED.extractor_version, "
-        "status = EXCLUDED.status, "
-        "text_content = EXCLUDED.text_content, "
-        "metadata = EXCLUDED.metadata, "
-        "last_error = EXCLUDED.last_error, "
-        "updated_at = NOW()",
+        "WITH extraction AS ("
+        "  INSERT INTO slack_attachment_text_extractions ("
+        "    channel_id, message_ts, slack_file_id, source_content_sha256, "
+        "    extractor_version, status, text_content, metadata, attempt_count, "
+        "    next_attempt_at, last_error"
+        "  ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11) "
+        "  ON CONFLICT (channel_id, message_ts, slack_file_id) DO UPDATE SET "
+        "    source_content_sha256 = EXCLUDED.source_content_sha256, "
+        "    extractor_version = EXCLUDED.extractor_version, "
+        "    status = EXCLUDED.status, "
+        "    text_content = EXCLUDED.text_content, "
+        "    metadata = EXCLUDED.metadata, "
+        "    attempt_count = EXCLUDED.attempt_count, "
+        "    next_attempt_at = EXCLUDED.next_attempt_at, "
+        "    last_error = EXCLUDED.last_error, "
+        "    updated_at = NOW() "
+        "  RETURNING 1"
+        ") "
+        "UPDATE slack_sync_message_attachments SET updated_at = NOW() "
+        "WHERE channel_id = $1 AND message_ts = $2 AND slack_file_id = $3 "
+        "AND EXISTS (SELECT 1 FROM extraction)",
         row["channel_id"],
         row["message_ts"],
         row["slack_file_id"],
@@ -383,16 +438,26 @@ async def _store_result(
         status,
         text_content,
         canonical_json(metadata or {}),
-        last_error,
+        attempt_count,
+        next_attempt_at,
+        last_error[:1_000],
     )
-    # The company-context attachment projection checkpoints the source row's
-    # updated_at, so make the newly extracted text visible to that existing path.
-    await pool.execute(
-        "UPDATE slack_sync_message_attachments SET updated_at = NOW() "
-        "WHERE channel_id = $1 AND message_ts = $2 AND slack_file_id = $3",
-        row["channel_id"],
-        row["message_ts"],
-        row["slack_file_id"],
+
+
+def _retry_state(
+    row: Any,
+    *,
+    max_attempts: int,
+) -> tuple[int, dt.datetime | None]:
+    attempt_count = int(row["attempt_count"] or 0) + 1
+    if attempt_count >= max_attempts:
+        return attempt_count, None
+    delay_seconds = min(
+        DEFAULT_RETRY_BASE_SECONDS * (2 ** (attempt_count - 1)),
+        DEFAULT_RETRY_MAX_SECONDS,
+    )
+    return attempt_count, dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+        seconds=delay_seconds
     )
 
 
@@ -405,10 +470,13 @@ async def _extract_and_store(
     max_expanded_bytes: int,
     max_pages: int,
     max_characters: int,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
 ) -> dict[str, Any]:
     source_hash = str(row["content_sha256"] or "") or None
     try:
-        data = await _attachment_bytes(row, max_download_bytes=max_download_bytes)
+        data, effective_mime_type = await _attachment_bytes(
+            row, max_download_bytes=max_download_bytes
+        )
     except UnsupportedAttachment as error:
         await _store_result(
             pool,
@@ -420,13 +488,30 @@ async def _extract_and_store(
             last_error=error.reason,
         )
         return {"status": "unsupported", "reason": error.reason}
+    except (RetryableDownloadError, OSError, urllib_error.URLError) as error:
+        attempt_count, next_attempt_at = _retry_state(row, max_attempts=max_attempts)
+        await _store_result(
+            pool,
+            row=row,
+            source_content_sha256=source_hash,
+            extractor_version=extractor_version,
+            status="failed",
+            attempt_count=attempt_count,
+            next_attempt_at=next_attempt_at,
+            last_error=f"{type(error).__name__}: {error}",
+        )
+        return {
+            "status": "failed",
+            "error_type": type(error).__name__,
+            "retry_scheduled": next_attempt_at is not None,
+        }
 
     source_hash = hashlib.sha256(data).hexdigest()
     try:
         text, metadata = extract_text(
             data,
             filename=str(row["name"] or ""),
-            declared_mime_type=str(row["mimetype"] or ""),
+            declared_mime_type=effective_mime_type,
             max_expanded_bytes=max_expanded_bytes,
             max_pages=max_pages,
             max_characters=max_characters,
@@ -451,6 +536,7 @@ async def _extract_and_store(
             source_content_sha256=source_hash,
             extractor_version=extractor_version,
             status="failed",
+            attempt_count=max_attempts,
             last_error=f"{type(error).__name__}: {error}",
         )
         return {"status": "failed", "error_type": type(error).__name__}
