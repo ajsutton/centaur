@@ -311,6 +311,10 @@ def test_slack_attachment_document_indexes_metadata_without_private_url():
         "text": "Please review <#C999|product> and <@U456>",
         "message_permalink": "https://example.slack.com/archives/C123/p1770000000000100",
         "url_private": "https://files.slack.com/files-pri/T/F123/roadmap.pdf",
+        "extraction_status": "succeeded",
+        "extractor_version": "1",
+        "extracted_text": "The roadmap launches Project Atlas in September.",
+        "extraction_metadata": {"page_count": 4, "character_count": 49},
     }
 
     document = projection._slack_attachment_document(
@@ -329,9 +333,12 @@ def test_slack_attachment_document_indexes_metadata_without_private_url():
     assert "- File type: pdf" in document["body"]
     assert "- Content SHA-256: abc123" in document["body"]
     assert "Please review #product and @bob" in document["body"]
+    assert "The roadmap launches Project Atlas in September." in document["body"]
     assert "files-pri" not in document["body"]
     assert "url_private" not in document["metadata"]
     assert document["metadata"]["message_permalink"].endswith("p1770000000000100")
+    assert document["metadata"]["extraction_status"] == "succeeded"
+    assert document["metadata"]["extraction"]["page_count"] == 4
 
 
 def test_attio_meeting_document_indexes_description_and_transcript():

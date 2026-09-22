@@ -870,6 +870,10 @@ def _slack_attachment_document(
         users_by_id=users_by_id,
         channels_by_id=channels_by_id,
     )
+    extraction_status = str(row.get("extraction_status") or "")
+    extractor_version = str(row.get("extractor_version") or "")
+    extracted_text = str(row.get("extracted_text") or "").strip()
+    extraction_metadata = decode_jsonb(row.get("extraction_metadata"), {})
 
     lines = [
         f"# {title}",
@@ -908,6 +912,17 @@ def _slack_attachment_document(
             message_text,
         ]
     )
+    if extraction_status == "succeeded" and extracted_text:
+        lines.extend(
+            [
+                "",
+                "---",
+                "",
+                "Extracted attachment text:",
+                "",
+                extracted_text,
+            ]
+        )
 
     body = "\n".join(lines).strip()
     source_document_id = f"{channel_id}:{message_ts}:{slack_file_id}"
@@ -927,6 +942,11 @@ def _slack_attachment_document(
         "content_sha256": content_sha256,
         "message_permalink": message_permalink,
         "attachment_permalink": attachment_permalink,
+        "extraction_status": extraction_status,
+        "extractor_version": extractor_version,
+        "extraction": extraction_metadata
+        if isinstance(extraction_metadata, dict)
+        else {},
     }
     url = attachment_permalink or message_permalink
     return {
@@ -1770,9 +1790,14 @@ async def _project_scope_page(
             attachment = await pool.fetchrow(
                 "SELECT a.*, c.channel_name, m.occurred_at, m.thread_ts, m.parent_message_ts, "
                 "m.user_id, u.user_name, u.real_name, u.display_name, m.text, "
-                "m.permalink AS message_permalink "
+                "m.permalink AS message_permalink, e.status AS extraction_status, "
+                "e.extractor_version, e.text_content AS extracted_text, "
+                "e.metadata AS extraction_metadata "
                 "FROM slack_sync_message_attachments a "
                 "JOIN slack_sync_messages m ON m.channel_id = a.channel_id AND m.message_ts = a.message_ts "
+                "LEFT JOIN slack_attachment_text_extractions e "
+                "ON e.channel_id = a.channel_id AND e.message_ts = a.message_ts "
+                "AND e.slack_file_id = a.slack_file_id "
                 "LEFT JOIN slack_sync_channels c ON c.channel_id = a.channel_id "
                 "LEFT JOIN slack_sync_users u ON u.user_id = m.user_id "
                 "WHERE a.channel_id = $1 AND a.message_ts = $2 AND a.slack_file_id = $3",
