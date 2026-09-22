@@ -245,6 +245,7 @@ def test_handler_persists_text_without_checkpointing_the_full_content():
     assert result["requeued"] is False
     assert "a.download_status = 'downloaded'" in pool.fetch_query
     assert "a.content_bytes IS NOT NULL" in pool.fetch_query
+    assert "split_part(lower(a.mimetype), ';', 1)" in pool.fetch_query
     assert step_values == [{"status": "succeeded", "characters": 17}]
     insert_args = pool.execute_calls[0][1]
     assert insert_args[6] == "confidential plan"
