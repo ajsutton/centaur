@@ -9,10 +9,9 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(
-    0,
-    str(Path(__file__).resolve().parents[2] / "services" / "workflow-python"),
-)
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT / "services" / "workflow-python"))
 
 
 def _load():

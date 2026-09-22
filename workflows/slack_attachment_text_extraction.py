@@ -52,7 +52,6 @@ class Input:
     """Runtime options for one attachment extraction batch."""
 
     batch_size: int | None = None
-    extractor_version: str | None = None
     max_expanded_bytes: int | None = None
     max_pages: int | None = None
     max_characters: int | None = None
@@ -275,9 +274,7 @@ def extract_text(
     return text, metadata
 
 
-async def _load_candidates(
-    pool, *, extractor_version: str, batch_size: int
-) -> list[Any]:
+async def _load_candidates(pool, *, batch_size: int) -> list[Any]:
     return list(
         await pool.fetch(
             "SELECT a.channel_id, a.message_ts, a.slack_file_id, a.name, a.mimetype, "
@@ -303,7 +300,7 @@ async def _load_candidates(
             PDF_MIME_TYPE,
             DOCX_MIME_TYPE,
             PPTX_MIME_TYPE,
-            extractor_version,
+            EXTRACTOR_VERSION,
             batch_size,
         )
     )
@@ -314,7 +311,6 @@ async def _store_result(
     *,
     row: Any,
     source_content_sha256: str | None,
-    extractor_version: str,
     status: str,
     text_content: str = "",
     metadata: dict[str, Any] | None = None,
@@ -345,7 +341,7 @@ async def _store_result(
         row["message_ts"],
         row["slack_file_id"],
         source_content_sha256,
-        extractor_version,
+        EXTRACTOR_VERSION,
         status,
         text_content,
         canonical_json(metadata or {}),
@@ -357,7 +353,6 @@ async def _extract_and_store(
     pool,
     row: Any,
     *,
-    extractor_version: str,
     max_expanded_bytes: int,
     max_pages: int,
     max_characters: int,
@@ -378,7 +373,6 @@ async def _extract_and_store(
             pool,
             row=row,
             source_content_sha256=source_hash,
-            extractor_version=extractor_version,
             status="unsupported",
             metadata=error.metadata,
             last_error=error.reason,
@@ -391,7 +385,6 @@ async def _extract_and_store(
             pool,
             row=row,
             source_content_sha256=source_hash,
-            extractor_version=extractor_version,
             status="failed",
             last_error=f"{type(error).__name__}: {error}",
         )
@@ -401,7 +394,6 @@ async def _extract_and_store(
         pool,
         row=row,
         source_content_sha256=source_hash,
-        extractor_version=extractor_version,
         status="succeeded",
         text_content=text,
         metadata=metadata,
@@ -409,14 +401,14 @@ async def _extract_and_store(
     return {"status": "succeeded", "characters": len(text)}
 
 
-def _step_name(row: Any, extractor_version: str) -> str:
+def _step_name(row: Any) -> str:
     identity = ":".join(
         [
             str(row["channel_id"]),
             str(row["message_ts"]),
             str(row["slack_file_id"]),
             str(row["content_sha256"] or row["updated_at"] or "unknown"),
-            extractor_version,
+            EXTRACTOR_VERSION,
         ]
     )
     return f"extract:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
@@ -432,11 +424,6 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         "SLACK_ATTACHMENT_EXTRACTION_BATCH_SIZE",
         DEFAULT_BATCH_SIZE,
     )
-    extractor_version = (
-        inp.extractor_version
-        or os.getenv("SLACK_ATTACHMENT_EXTRACTOR_VERSION")
-        or EXTRACTOR_VERSION
-    ).strip()
     max_expanded_bytes = _configured_positive_int(
         inp.max_expanded_bytes,
         "SLACK_ATTACHMENT_EXTRACTION_MAX_EXPANDED_BYTES",
@@ -452,20 +439,15 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         "SLACK_ATTACHMENT_EXTRACTION_MAX_CHARACTERS",
         DEFAULT_MAX_CHARACTERS,
     )
-    rows = await _load_candidates(
-        ctx._pool,
-        extractor_version=extractor_version,
-        batch_size=batch_size,
-    )
+    rows = await _load_candidates(ctx._pool, batch_size=batch_size)
 
     counts = {"succeeded": 0, "unsupported": 0, "failed": 0}
     for row in rows:
         result = await ctx.step(
-            _step_name(row, extractor_version),
+            _step_name(row),
             lambda row=row: _extract_and_store(
                 ctx._pool,
                 row,
-                extractor_version=extractor_version,
                 max_expanded_bytes=max_expanded_bytes,
                 max_pages=max_pages,
                 max_characters=max_characters,
@@ -480,7 +462,6 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             WORKFLOW_NAME,
             {
                 "batch_size": batch_size,
-                "extractor_version": extractor_version,
                 "max_expanded_bytes": max_expanded_bytes,
                 "max_pages": max_pages,
                 "max_characters": max_characters,
@@ -495,7 +476,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     result: dict[str, Any] = {
         "status": "completed",
         **counts,
-        "extractor_version": extractor_version,
+        "extractor_version": EXTRACTOR_VERSION,
         "requeued": next_run is not None,
     }
     if next_run is not None:
