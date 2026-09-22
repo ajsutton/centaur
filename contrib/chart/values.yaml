@@ -534,6 +534,14 @@ apiRs:
       attachments:
         enabled: true
         maxBytes: 10485760
+        extraction:
+          enabled: true
+          intervalSeconds: 300
+          batchSize: 10
+          maxDownloadBytes: 52428800
+          maxExpandedBytes: 262144000
+          maxPages: 250
+          maxCharacters: 2000000
       backfill:
         enabled: true
         intervalSeconds: 600

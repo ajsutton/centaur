@@ -1095,6 +1095,7 @@ fn workflow_queue_class(workflow_name: &str) -> WorkflowQueueClass {
         | "linear_sync"
         | "company_context_documents"
         | "company_context_embeddings"
+        | "slack_attachment_text_extraction"
         | "memory_generation"
         | "slack_retention"
         | "chief_of_staff_daily" => WorkflowQueueClass::Etl,
@@ -5075,6 +5076,7 @@ mod tests {
             "linear_sync",
             "company_context_documents",
             "company_context_embeddings",
+            "slack_attachment_text_extraction",
             "memory_generation",
             "slack_retention",
             "chief_of_staff_daily",
