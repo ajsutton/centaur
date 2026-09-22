@@ -110,7 +110,7 @@ apiRs:
 | `SLACK_ATTACHMENT_EXTRACTION_ENABLED` | `true` | Extracts searchable text from supported Slack attachments when Slack ETL is enabled. |
 | `SLACK_ATTACHMENT_EXTRACTION_INTERVAL_SECONDS` | `300` | How often to scan for attachments requiring extraction. |
 | `SLACK_ATTACHMENT_EXTRACTION_BATCH_SIZE` | `10` | Maximum attachments processed by one workflow run before it requeues. |
-| `SLACK_ATTACHMENT_EXTRACTION_MAX_EXPANDED_BYTES` | `262144000` | Maximum expanded size accepted for DOCX and PPTX ZIP containers. |
+| `SLACK_ATTACHMENT_EXTRACTION_MAX_EXPANDED_BYTES` | `33554432` | Maximum expanded size accepted for DOCX and PPTX ZIP containers. |
 | `SLACK_ATTACHMENT_EXTRACTION_MAX_PAGES` | `250` | Maximum PDF pages processed. Longer PDFs are indexed partially and marked truncated. |
 | `SLACK_ATTACHMENT_EXTRACTION_MAX_CHARACTERS` | `2000000` | Maximum extracted characters stored per attachment. |
 | `SLACK_ETL_EXCLUDED_CHANNEL_PATTERNS` | empty | Comma-separated channel-name globs to skip, without needing the leading `#`. |

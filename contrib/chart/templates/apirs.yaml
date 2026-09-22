@@ -85,7 +85,7 @@
   (dict "name" "SLACK_ATTACHMENT_EXTRACTION_ENABLED" "value" (dig "slack" "attachments" "extraction" "enabled" true $apiRsEtl))
   (dict "name" "SLACK_ATTACHMENT_EXTRACTION_INTERVAL_SECONDS" "value" (dig "slack" "attachments" "extraction" "intervalSeconds" 300 $apiRsEtl))
   (dict "name" "SLACK_ATTACHMENT_EXTRACTION_BATCH_SIZE" "value" (dig "slack" "attachments" "extraction" "batchSize" 10 $apiRsEtl))
-  (dict "name" "SLACK_ATTACHMENT_EXTRACTION_MAX_EXPANDED_BYTES" "value" (dig "slack" "attachments" "extraction" "maxExpandedBytes" 262144000 $apiRsEtl))
+  (dict "name" "SLACK_ATTACHMENT_EXTRACTION_MAX_EXPANDED_BYTES" "value" (dig "slack" "attachments" "extraction" "maxExpandedBytes" 33554432 $apiRsEtl))
   (dict "name" "SLACK_ATTACHMENT_EXTRACTION_MAX_PAGES" "value" (dig "slack" "attachments" "extraction" "maxPages" 250 $apiRsEtl))
   (dict "name" "SLACK_ATTACHMENT_EXTRACTION_MAX_CHARACTERS" "value" (dig "slack" "attachments" "extraction" "maxCharacters" 2000000 $apiRsEtl))
   (dict "name" "SLACK_BACKFILL_ENABLED" "value" (dig "slack" "backfill" "enabled" true $apiRsEtl))

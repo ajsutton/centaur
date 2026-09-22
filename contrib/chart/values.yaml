@@ -538,7 +538,7 @@ apiRs:
           enabled: true
           intervalSeconds: 300
           batchSize: 10
-          maxExpandedBytes: 262144000
+          maxExpandedBytes: 33554432
           maxPages: 250
           maxCharacters: 2000000
       backfill:

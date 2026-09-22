@@ -96,6 +96,33 @@ def test_image_only_pdf_is_unsupported_without_ocr():
         )
 
 
+def test_password_protected_pdf_is_unsupported():
+    pymupdf = pytest.importorskip("pymupdf")
+    extraction = _load()
+    document = pymupdf.open()
+    document.new_page().insert_text((72, 72), "Confidential plan")
+    payload = document.tobytes(
+        encryption=pymupdf.PDF_ENCRYPT_AES_256,
+        owner_pw="owner-secret",
+        user_pw="user-secret",
+    )
+    document.close()
+
+    with pytest.raises(
+        extraction.UnsupportedAttachment, match="password_protected_pdf"
+    ) as raised:
+        extraction.extract_text(
+            payload,
+            filename="protected.pdf",
+            declared_mime_type="application/pdf",
+            max_expanded_bytes=1_000,
+            max_pages=10,
+            max_characters=10_000,
+        )
+
+    assert raised.value.metadata == {"password_protected": True}
+
+
 def test_extracts_docx_paragraphs_and_tables():
     docx = pytest.importorskip("docx")
     extraction = _load()
@@ -119,6 +146,18 @@ def test_extracts_docx_paragraphs_and_tables():
     assert "Quarterly roadmap" in text
     assert "Owner\tAvery" in text
     assert metadata["table_count"] == 1
+
+    with pytest.raises(
+        extraction.UnsupportedAttachment, match="expanded_file_too_large"
+    ):
+        extraction.extract_text(
+            output.getvalue(),
+            filename="roadmap.docx",
+            declared_mime_type=extraction.DOCX_MIME_TYPE,
+            max_expanded_bytes=1,
+            max_pages=10,
+            max_characters=10_000,
+        )
 
 
 def test_extracts_pptx_slide_text_and_notes():

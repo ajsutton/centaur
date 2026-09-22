@@ -20,7 +20,7 @@ WORKFLOW_NAME = "slack_attachment_text_extraction"
 EXTRACTOR_VERSION = "1"
 DEFAULT_INTERVAL_SECONDS = 5 * 60
 DEFAULT_BATCH_SIZE = 10
-DEFAULT_MAX_EXPANDED_BYTES = 250 * 1024 * 1024
+DEFAULT_MAX_EXPANDED_BYTES = 32 * 1024 * 1024
 DEFAULT_MAX_PAGES = 250
 DEFAULT_MAX_CHARACTERS = 2_000_000
 
@@ -142,6 +142,10 @@ def _extract_pdf(data: bytes, max_pages: int) -> tuple[str, dict[str, Any]]:
         raise UnsupportedAttachment("invalid_or_encrypted_pdf") from error
 
     try:
+        if document.needs_pass:
+            raise UnsupportedAttachment(
+                "password_protected_pdf", {"password_protected": True}
+            )
         page_count = document.page_count
         processed_pages = min(page_count, max_pages)
         pages_without_text: list[int] = []

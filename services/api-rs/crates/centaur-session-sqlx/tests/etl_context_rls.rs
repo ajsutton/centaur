@@ -16,6 +16,7 @@ struct VisibleRows {
     slack_users: Vec<String>,
     slack_messages: Vec<String>,
     slack_attachments: Vec<String>,
+    slack_attachment_extractions: Vec<String>,
     context_docs: Vec<String>,
     google_drive_runs: i64,
     google_drive_files: i64,
@@ -186,6 +187,7 @@ async fn assert_channel_visibility(conn: &mut PgConnection) -> Result<(), Box<dy
             slack_users: vec![],
             slack_messages: vec!["C_ALPHA:1000.000001".to_owned()],
             slack_attachments: vec!["C_ALPHA:1000.000001:F_ALPHA".to_owned()],
+            slack_attachment_extractions: vec!["C_ALPHA:1000.000001:F_ALPHA".to_owned(),],
             context_docs: vec!["doc_slack_alpha".to_owned()],
             google_drive_runs: 0,
             google_drive_files: 0,
@@ -210,6 +212,7 @@ async fn assert_channel_visibility(conn: &mut PgConnection) -> Result<(), Box<dy
             slack_users: vec![],
             slack_messages: vec!["C_BETA:1000.000002".to_owned()],
             slack_attachments: vec!["C_BETA:1000.000002:F_BETA".to_owned()],
+            slack_attachment_extractions: vec!["C_BETA:1000.000002:F_BETA".to_owned(),],
             context_docs: vec!["doc_slack_beta".to_owned()],
             google_drive_runs: 0,
             google_drive_files: 0,
@@ -241,6 +244,7 @@ async fn assert_channel_visibility(conn: &mut PgConnection) -> Result<(), Box<dy
             slack_users: vec![],
             slack_messages: vec![],
             slack_attachments: vec![],
+            slack_attachment_extractions: vec![],
             context_docs: vec![],
             google_drive_runs: 0,
             google_drive_files: 0,
@@ -263,6 +267,22 @@ async fn assert_channel_visibility(conn: &mut PgConnection) -> Result<(), Box<dy
     let readonly_private_channel =
         visible_rows(conn, "centaur_readonly", Some("G_PRIVATE")).await?;
     assert_eq!(readonly_private_channel, public_and_private_visible_rows());
+
+    sqlx::query(
+        "delete from slack_sync_message_attachments \
+         where channel_id = 'C_ALPHA' and message_ts = '1000.000001' \
+         and slack_file_id = 'F_ALPHA'",
+    )
+    .execute(&mut *conn)
+    .await?;
+    let remaining_extractions: i64 = sqlx::query_scalar(
+        "select count(*) from slack_attachment_text_extractions \
+         where channel_id = 'C_ALPHA' and message_ts = '1000.000001' \
+         and slack_file_id = 'F_ALPHA'",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    assert_eq!(remaining_extractions, 0, "attachment deletion must cascade");
 
     Ok(())
 }
@@ -515,6 +535,14 @@ fn expected_policies() -> Vec<(String, String)> {
         (
             "slack_sync_message_attachments",
             "centaur_slack_message_attachments_reader_select",
+        ),
+        (
+            "slack_attachment_text_extractions",
+            "centaur_slack_attachment_extractions_reader_select",
+        ),
+        (
+            "slack_attachment_text_extractions",
+            "centaur_readonly_slack_attachment_extractions_select",
         ),
         (
             "company_context_documents",
@@ -1343,6 +1371,13 @@ async fn insert_fixture_rows(conn: &mut PgConnection) -> Result<(), sqlx::Error>
             ('C_BETA', '1000.000002', 'F_BETA', 'beta.pdf'),
             ('G_PRIVATE', '1000.000003', 'F_PRIVATE', 'private.pdf');
 
+        insert into slack_attachment_text_extractions
+            (channel_id, message_ts, slack_file_id, extractor_version, status)
+        values
+            ('C_ALPHA', '1000.000001', 'F_ALPHA', '1', 'succeeded'),
+            ('C_BETA', '1000.000002', 'F_BETA', '1', 'succeeded'),
+            ('G_PRIVATE', '1000.000003', 'F_PRIVATE', '1', 'succeeded');
+
         insert into company_context_documents
             (document_id, source, source_type, source_document_id, metadata)
         values
@@ -1476,6 +1511,11 @@ async fn visible_rows(
         slack_attachments: text_array(
             &mut tx,
             "select coalesce(array_agg(channel_id || ':' || message_ts || ':' || slack_file_id order by channel_id, message_ts, slack_file_id), '{}') from slack_sync_message_attachments",
+        )
+        .await?,
+        slack_attachment_extractions: text_array(
+            &mut tx,
+            "select coalesce(array_agg(channel_id || ':' || message_ts || ':' || slack_file_id order by channel_id, message_ts, slack_file_id), '{}') from slack_attachment_text_extractions",
         )
         .await?,
         context_docs: text_array(
@@ -1766,6 +1806,7 @@ fn empty_visible_rows() -> VisibleRows {
         slack_users: vec![],
         slack_messages: vec![],
         slack_attachments: vec![],
+        slack_attachment_extractions: vec![],
         context_docs: vec![],
         google_drive_runs: 0,
         google_drive_files: 0,
@@ -1802,6 +1843,10 @@ fn public_visible_rows() -> VisibleRows {
             "C_ALPHA:1000.000001:F_ALPHA".to_owned(),
             "C_BETA:1000.000002:F_BETA".to_owned(),
         ],
+        slack_attachment_extractions: vec![
+            "C_ALPHA:1000.000001:F_ALPHA".to_owned(),
+            "C_BETA:1000.000002:F_BETA".to_owned(),
+        ],
         context_docs: vec![
             "doc_gcal".to_owned(),
             "doc_gdrive".to_owned(),
@@ -1829,6 +1874,8 @@ fn public_and_private_visible_rows() -> VisibleRows {
     rows.slack_channels.push("G_PRIVATE".to_owned());
     rows.slack_messages.push("G_PRIVATE:1000.000003".to_owned());
     rows.slack_attachments
+        .push("G_PRIVATE:1000.000003:F_PRIVATE".to_owned());
+    rows.slack_attachment_extractions
         .push("G_PRIVATE:1000.000003:F_PRIVATE".to_owned());
     rows.context_docs.push("doc_slack_private".to_owned());
     rows
