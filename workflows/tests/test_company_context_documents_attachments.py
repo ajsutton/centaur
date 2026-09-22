@@ -340,6 +340,22 @@ def test_slack_attachment_document_indexes_metadata_without_private_url():
     assert document["metadata"]["extraction_status"] == "succeeded"
     assert document["metadata"]["extraction"]["page_count"] == 4
 
+    without_extraction = projection._slack_attachment_document(
+        {
+            **row,
+            "extraction_status": None,
+            "extractor_version": None,
+            "extracted_text": None,
+            "extraction_metadata": None,
+        },
+        users_by_id={"U456": "bob"},
+        channels_by_id={"C999": "product"},
+    )
+    assert without_extraction is not None
+    assert "extraction_status" not in without_extraction["metadata"]
+    assert "extractor_version" not in without_extraction["metadata"]
+    assert "extraction" not in without_extraction["metadata"]
+
 
 def test_attio_meeting_document_indexes_description_and_transcript():
     row = {

@@ -942,12 +942,17 @@ def _slack_attachment_document(
         "content_sha256": content_sha256,
         "message_permalink": message_permalink,
         "attachment_permalink": attachment_permalink,
-        "extraction_status": extraction_status,
-        "extractor_version": extractor_version,
-        "extraction": extraction_metadata
-        if isinstance(extraction_metadata, dict)
-        else {},
     }
+    if extraction_status:
+        metadata.update(
+            {
+                "extraction_status": extraction_status,
+                "extractor_version": extractor_version,
+                "extraction": extraction_metadata
+                if isinstance(extraction_metadata, dict)
+                else {},
+            }
+        )
     url = attachment_permalink or message_permalink
     return {
         "document_id": f"slack:attachment:{channel_id}:{message_ts}:{slack_file_id}",

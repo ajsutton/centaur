@@ -18,7 +18,14 @@ sys.path.insert(
 def _load():
     # Some workflow unit tests install module stubs without restoring them.
     # Ensure this test exercises the real shared Slack implementation.
-    for name in ("workflows.etl_metrics", "workflows.slack.shared"):
+    for name in (
+        "api.metrics",
+        "api.runtime_control",
+        "api.workflow_engine",
+        "api",
+        "workflows.etl_metrics",
+        "workflows.slack.shared",
+    ):
         module = sys.modules.get(name)
         if module is not None and not getattr(module, "__file__", None):
             sys.modules.pop(name)
