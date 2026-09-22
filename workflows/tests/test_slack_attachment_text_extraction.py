@@ -142,55 +142,26 @@ def test_extracts_pptx_slide_text_and_notes():
     assert metadata["slide_count"] == 1
 
 
-def test_rejects_non_slack_download_url_before_creating_client(monkeypatch):
+def test_attachment_bytes_requires_downloaded_content():
     extraction = _load()
-    monkeypatch.setattr(
-        extraction,
-        "_slack_client",
-        lambda: (_ for _ in ()).throw(AssertionError("must not create client")),
-    )
-    row = {
-        "content_bytes": None,
-        "size_bytes": 100,
-        "url_private": "https://example.com/private.pdf",
-        "mimetype": "application/pdf",
-        "name": "private.pdf",
-    }
-
-    with pytest.raises(extraction.UnsupportedAttachment, match="invalid_download_url"):
-        asyncio.run(extraction._attachment_bytes(row, max_download_bytes=1_000))
-
-
-def test_rejects_html_download_response_for_binary_document(monkeypatch):
-    extraction = _load()
-
-    class FakeSlackClient:
-        def download_file_bytes(self, _url, *, max_bytes):
-            assert max_bytes == 1_000
-            return "text/html", b"<html>sign in</html>"
-
-    monkeypatch.setattr(extraction, "_slack_client", FakeSlackClient)
-    row = {
-        "content_bytes": None,
-        "size_bytes": 100,
-        "url_private": "https://files.slack.com/files-pri/T/F123/report.pdf",
-        "mimetype": "application/pdf",
-        "name": "report.pdf",
-    }
 
     with pytest.raises(
-        extraction.RetryableDownloadError, match="unexpected Slack file content type"
+        extraction.UnsupportedAttachment, match="content_not_downloaded"
     ):
-        asyncio.run(extraction._attachment_bytes(row, max_download_bytes=1_000))
+        extraction._attachment_bytes(
+            {"content_bytes": None, "mimetype": "application/pdf"}
+        )
 
 
 class FakePool:
     def __init__(self, rows):
         self.rows = rows
+        self.fetch_query = None
         self.fetch_args = None
         self.execute_calls = []
 
-    async def fetch(self, _query, *args):
+    async def fetch(self, query, *args):
+        self.fetch_query = query
         self.fetch_args = args
         return self.rows
 
@@ -198,62 +169,7 @@ class FakePool:
         self.execute_calls.append((query, args))
 
 
-def test_download_failure_is_persisted_with_retry_backoff(monkeypatch):
-    extraction = _load()
-    row = {
-        "channel_id": "C123",
-        "message_ts": "1770000000.000100",
-        "slack_file_id": "F123",
-        "name": "report.pdf",
-        "mimetype": "application/pdf",
-        "content_sha256": None,
-        "attempt_count": 0,
-    }
-    pool = FakePool([])
-
-    async def fail_download(_row, *, max_download_bytes):
-        assert max_download_bytes == 1_000
-        raise extraction.RetryableDownloadError("URLError: temporary failure")
-
-    monkeypatch.setattr(extraction, "_attachment_bytes", fail_download)
-
-    result = asyncio.run(
-        extraction._extract_and_store(
-            pool,
-            row,
-            extractor_version="1",
-            max_download_bytes=1_000,
-            max_expanded_bytes=2_000,
-            max_pages=10,
-            max_characters=10_000,
-        )
-    )
-
-    assert result == {
-        "status": "failed",
-        "error_type": "RetryableDownloadError",
-        "retry_scheduled": True,
-    }
-    assert len(pool.execute_calls) == 1
-    stored_args = pool.execute_calls[0][1]
-    assert stored_args[5] == "failed"
-    assert stored_args[8] == 1
-    assert stored_args[9] is not None
-    assert "temporary failure" in stored_args[10]
-
-
-def test_retry_backoff_stops_after_max_attempts():
-    extraction = _load()
-    count, retry_at = extraction._retry_state(
-        {"attempt_count": extraction.DEFAULT_MAX_ATTEMPTS - 1},
-        max_attempts=extraction.DEFAULT_MAX_ATTEMPTS,
-    )
-
-    assert count == extraction.DEFAULT_MAX_ATTEMPTS
-    assert retry_at is None
-
-
-def test_handler_persists_text_without_checkpointing_the_full_content(monkeypatch):
+def test_handler_persists_text_without_checkpointing_the_full_content():
     extraction = _load()
     row = {
         "channel_id": "C123",
@@ -263,12 +179,10 @@ def test_handler_persists_text_without_checkpointing_the_full_content(monkeypatc
         "mimetype": "text/plain",
         "filetype": "txt",
         "size_bytes": 16,
-        "url_private": "",
         "download_status": "downloaded",
         "content_sha256": None,
         "content_bytes": b"confidential plan",
         "updated_at": "2026-07-01T00:00:00Z",
-        "attempt_count": 0,
     }
     pool = FakePool([row])
     step_values = []
@@ -295,6 +209,8 @@ def test_handler_persists_text_without_checkpointing_the_full_content(monkeypatc
 
     assert result["succeeded"] == 1
     assert result["requeued"] is False
+    assert "a.download_status = 'downloaded'" in pool.fetch_query
+    assert "a.content_bytes IS NOT NULL" in pool.fetch_query
     assert step_values == [{"status": "succeeded", "characters": 17}]
     insert_args = pool.execute_calls[0][1]
     assert insert_args[6] == "confidential plan"

@@ -9,8 +9,6 @@ create table if not exists slack_attachment_text_extractions (
         check (status in ('succeeded', 'unsupported', 'failed')),
     text_content text not null default '',
     metadata jsonb not null default '{}'::jsonb,
-    attempt_count integer not null default 0 check (attempt_count >= 0),
-    next_attempt_at timestamptz,
     last_error text not null default '',
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
@@ -24,8 +22,8 @@ create table if not exists slack_attachment_text_extractions (
         on delete cascade
 );
 
-create index if not exists idx_slack_attachment_text_extractions_queue
-    on slack_attachment_text_extractions (status, next_attempt_at, updated_at);
+create index if not exists idx_slack_attachment_text_extractions_version
+    on slack_attachment_text_extractions (extractor_version, updated_at);
 
 grant select on slack_attachment_text_extractions
     to centaur_slack_reader, centaur_readonly;

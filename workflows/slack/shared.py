@@ -77,8 +77,6 @@ def attachment_max_bytes() -> int:
 class SlackSyncClient(Protocol):
     """Small protocol for the direct Slack client used by Slack ETL workflows."""
 
-    def download_file_bytes(self, url: str, *, max_bytes: int) -> tuple[str, bytes]: ...
-
     def _etl_access_mode(self) -> str: ...
 
     def _list_etl_channels(
@@ -947,15 +945,6 @@ class SlackEtlClient:
             return f"@{name}"
 
         return re.sub(r"<@([A-Z0-9]+)>", replace_mention, text)
-
-    def download_file_bytes(
-        self,
-        url: str,
-        *,
-        max_bytes: int,
-    ) -> tuple[str, bytes]:
-        """Fetch one Slack file for a workflow, enforcing its byte cap."""
-        return self._download_slack_file_bytes(url, max_bytes=max_bytes)
 
     def _download_slack_file_bytes(
         self,

@@ -110,7 +110,6 @@ apiRs:
 | `SLACK_ATTACHMENT_EXTRACTION_ENABLED` | `true` | Extracts searchable text from supported Slack attachments when Slack ETL is enabled. |
 | `SLACK_ATTACHMENT_EXTRACTION_INTERVAL_SECONDS` | `300` | How often to scan for attachments requiring extraction. |
 | `SLACK_ATTACHMENT_EXTRACTION_BATCH_SIZE` | `10` | Maximum attachments processed by one workflow run before it requeues. |
-| `SLACK_ATTACHMENT_EXTRACTION_MAX_DOWNLOAD_BYTES` | `52428800` | Maximum stored or transiently fetched attachment size accepted for extraction. |
 | `SLACK_ATTACHMENT_EXTRACTION_MAX_EXPANDED_BYTES` | `262144000` | Maximum expanded size accepted for DOCX and PPTX ZIP containers. |
 | `SLACK_ATTACHMENT_EXTRACTION_MAX_PAGES` | `250` | Maximum PDF pages processed. Longer PDFs are indexed partially and marked truncated. |
 | `SLACK_ATTACHMENT_EXTRACTION_MAX_CHARACTERS` | `2000000` | Maximum extracted characters stored per attachment. |
@@ -147,10 +146,10 @@ Slack ETL writes normalized Slack data into dedicated tables:
 
 Attachment document projection indexes Slack file names, titles, MIME/file
 types, Slack permalinks, download status, checksums, the message the file was
-attached to, and successfully extracted text. Oversized supported files can be
-fetched transiently for extraction without storing their bytes in Postgres.
-Private Slack download URLs are never indexed. Image-only PDFs remain
-metadata-only because extraction does not perform OCR.
+attached to, and successfully extracted text. Only attachments downloaded into
+Postgres under `SLACK_ETL_ATTACHMENT_MAX_BYTES` are extracted. Private Slack
+download URLs are never indexed. Oversized attachments and image-only PDFs
+remain metadata-only.
 
 The first incremental run reads a small recent window so useful data appears
 quickly, then seeds historical backfill jobs for the configured lookback. Later

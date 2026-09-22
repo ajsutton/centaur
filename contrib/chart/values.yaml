@@ -538,7 +538,6 @@ apiRs:
           enabled: true
           intervalSeconds: 300
           batchSize: 10
-          maxDownloadBytes: 52428800
           maxExpandedBytes: 262144000
           maxPages: 250
           maxCharacters: 2000000
