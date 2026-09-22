@@ -213,7 +213,7 @@ def test_download_failure_is_persisted_with_retry_backoff(monkeypatch):
 
     async def fail_download(_row, *, max_download_bytes):
         assert max_download_bytes == 1_000
-        raise extraction.urllib_error.URLError("temporary failure")
+        raise extraction.RetryableDownloadError("URLError: temporary failure")
 
     monkeypatch.setattr(extraction, "_attachment_bytes", fail_download)
 
@@ -231,7 +231,7 @@ def test_download_failure_is_persisted_with_retry_backoff(monkeypatch):
 
     assert result == {
         "status": "failed",
-        "error_type": "URLError",
+        "error_type": "RetryableDownloadError",
         "retry_scheduled": True,
     }
     assert len(pool.execute_calls) == 1

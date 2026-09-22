@@ -81,6 +81,10 @@ class RetryableDownloadError(RuntimeError):
     """A Slack file download failed in a way that may succeed later."""
 
 
+class ExtractionFailed(RuntimeError):
+    """A parser failed unexpectedly and should not be retried."""
+
+
 def _configured_positive_int(
     explicit: int | None,
     env_name: str,
@@ -375,6 +379,8 @@ async def _attachment_bytes(row: Any, *, max_download_bytes: int) -> tuple[bytes
             "file_too_large",
             {"max_download_bytes": max_download_bytes},
         ) from error
+    except (OSError, urllib_error.URLError) as error:
+        raise RetryableDownloadError(f"{type(error).__name__}: {error}") from error
 
     response_mime_type = str(response_mime_type or "").lower().split(";", 1)[0]
     suffix = _suffix(str(row["name"] or ""))
@@ -461,6 +467,83 @@ def _retry_state(
     )
 
 
+def _extract_attachment(
+    data: bytes,
+    *,
+    filename: str,
+    declared_mime_type: str,
+    max_expanded_bytes: int,
+    max_pages: int,
+    max_characters: int,
+) -> tuple[str, dict[str, Any]]:
+    try:
+        return extract_text(
+            data,
+            filename=filename,
+            declared_mime_type=declared_mime_type,
+            max_expanded_bytes=max_expanded_bytes,
+            max_pages=max_pages,
+            max_characters=max_characters,
+        )
+    except UnsupportedAttachment:
+        raise
+    # Third-party parsers expose unrelated exception hierarchies. Normalize
+    # them here so orchestration only handles extraction outcomes.
+    except Exception as error:
+        raise ExtractionFailed(f"{type(error).__name__}: {error}") from error
+
+
+async def _record_unsupported(
+    pool,
+    row: Any,
+    *,
+    source_hash: str | None,
+    extractor_version: str,
+    error: UnsupportedAttachment,
+) -> dict[str, Any]:
+    await _store_result(
+        pool,
+        row=row,
+        source_content_sha256=source_hash,
+        extractor_version=extractor_version,
+        status="unsupported",
+        metadata=error.metadata,
+        last_error=error.reason,
+    )
+    return {"status": "unsupported", "reason": error.reason}
+
+
+async def _record_failure(
+    pool,
+    row: Any,
+    *,
+    source_hash: str | None,
+    extractor_version: str,
+    error: RuntimeError,
+    max_attempts: int,
+    retry: bool,
+) -> dict[str, Any]:
+    if retry:
+        attempt_count, next_attempt_at = _retry_state(row, max_attempts=max_attempts)
+    else:
+        attempt_count, next_attempt_at = max_attempts, None
+    await _store_result(
+        pool,
+        row=row,
+        source_content_sha256=source_hash,
+        extractor_version=extractor_version,
+        status="failed",
+        attempt_count=attempt_count,
+        next_attempt_at=next_attempt_at,
+        last_error=str(error),
+    )
+    return {
+        "status": "failed",
+        "error_type": type(error).__name__,
+        "retry_scheduled": next_attempt_at is not None,
+    }
+
+
 async def _extract_and_store(
     pool,
     row: Any,
@@ -477,38 +560,8 @@ async def _extract_and_store(
         data, effective_mime_type = await _attachment_bytes(
             row, max_download_bytes=max_download_bytes
         )
-    except UnsupportedAttachment as error:
-        await _store_result(
-            pool,
-            row=row,
-            source_content_sha256=source_hash,
-            extractor_version=extractor_version,
-            status="unsupported",
-            metadata=error.metadata,
-            last_error=error.reason,
-        )
-        return {"status": "unsupported", "reason": error.reason}
-    except (RetryableDownloadError, OSError, urllib_error.URLError) as error:
-        attempt_count, next_attempt_at = _retry_state(row, max_attempts=max_attempts)
-        await _store_result(
-            pool,
-            row=row,
-            source_content_sha256=source_hash,
-            extractor_version=extractor_version,
-            status="failed",
-            attempt_count=attempt_count,
-            next_attempt_at=next_attempt_at,
-            last_error=f"{type(error).__name__}: {error}",
-        )
-        return {
-            "status": "failed",
-            "error_type": type(error).__name__,
-            "retry_scheduled": next_attempt_at is not None,
-        }
-
-    source_hash = hashlib.sha256(data).hexdigest()
-    try:
-        text, metadata = extract_text(
+        source_hash = hashlib.sha256(data).hexdigest()
+        text, metadata = _extract_attachment(
             data,
             filename=str(row["name"] or ""),
             declared_mime_type=effective_mime_type,
@@ -517,29 +570,33 @@ async def _extract_and_store(
             max_characters=max_characters,
         )
     except UnsupportedAttachment as error:
-        await _store_result(
+        return await _record_unsupported(
             pool,
-            row=row,
-            source_content_sha256=source_hash,
+            row,
+            source_hash=source_hash,
             extractor_version=extractor_version,
-            status="unsupported",
-            metadata=error.metadata,
-            last_error=error.reason,
+            error=error,
         )
-        return {"status": "unsupported", "reason": error.reason}
-    # Third-party parsers expose unrelated exception hierarchies. Treat any
-    # parser failure as terminal for this content/version instead of retrying it forever.
-    except Exception as error:  # noqa: BLE001
-        await _store_result(
+    except RetryableDownloadError as error:
+        return await _record_failure(
             pool,
-            row=row,
-            source_content_sha256=source_hash,
+            row,
+            source_hash=source_hash,
             extractor_version=extractor_version,
-            status="failed",
-            attempt_count=max_attempts,
-            last_error=f"{type(error).__name__}: {error}",
+            error=error,
+            max_attempts=max_attempts,
+            retry=True,
         )
-        return {"status": "failed", "error_type": type(error).__name__}
+    except ExtractionFailed as error:
+        return await _record_failure(
+            pool,
+            row,
+            source_hash=source_hash,
+            extractor_version=extractor_version,
+            error=error,
+            max_attempts=max_attempts,
+            retry=False,
+        )
 
     await _store_result(
         pool,
