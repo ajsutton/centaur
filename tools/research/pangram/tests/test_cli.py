@@ -4,7 +4,7 @@ import json
 from unittest.mock import MagicMock
 
 import httpx
-from centaur_tool_pangram import cli
+from pangram import cli
 from typer.testing import CliRunner
 
 

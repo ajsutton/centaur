@@ -4,7 +4,7 @@ import json
 from unittest.mock import patch
 
 import httpx
-from centaur_tool_pangram.client import PangramClient
+from pangram.client import PangramClient
 
 
 def test_detect_submits_and_polls_until_success():
@@ -32,7 +32,7 @@ def test_detect_submits_and_polls_until_success():
 
     with PangramClient(api_key="test-key") as client:
         client._client = httpx.Client(transport=httpx.MockTransport(handler))
-        with patch("centaur_tool_pangram.client.time.sleep") as sleep:
+        with patch("pangram.client.time.sleep") as sleep:
             result = client.detect(
                 "A passage",
                 model="pangram-4",
