@@ -1,16 +1,22 @@
 module GoogleDocs
-  class InitialSyncJob < SyncJob
+  class PdfBackfillJob < SyncJob
     private
 
     def sync_page(credential, sync, checkpoint)
-      return if user_changes_page_token(checkpoint)
+      unless user_changes_page_token(checkpoint)
+        GoogleDocs::InitialSyncJob.perform_later(credential.id)
+        return
+      end
+      unless SyncCredential.pdf_backfill_required?(credential, checkpoint)
+        GoogleDocs::IncrementalSyncJob.perform_later(credential.id)
+        return
+      end
 
-      user_start_page_token = sync.user_start_page_token
-      run_id = "gdocs_#{SecureRandom.hex(16)}"
+      run_id = "gdocs_pdf_backfill_#{SecureRandom.hex(16)}"
       page_token = nil
       files_seen = 0
       loop do
-        page = sync.list_user_files_page(page_token: page_token)
+        page = sync.list_user_pdfs_page(page_token: page_token)
         files = Array(page["files"]).select { |file| sync.eligible_file?(file) }
         files_seen += files.length
         ingest_page(
@@ -18,8 +24,8 @@ module GoogleDocs
           sync,
           files: files,
           deactivations: [],
-          mode: "initial",
-          source: "drive.files.list",
+          mode: "pdf_backfill",
+          source: "drive.files.list.pdf_backfill",
           run_id: run_id,
           files_seen: files_seen,
           finished: false
@@ -34,19 +40,15 @@ module GoogleDocs
         run: run_payload(
           credential,
           run_id,
-          mode: "initial",
+          mode: "pdf_backfill",
           files_seen: files_seen,
           finished: true
         ),
-        observation_sweeps: [
-          { broker_credential_id: credential.oid, source_run_id: run_id }
-        ],
         checkpoint: checkpoint_payload(
           credential,
-          user_changes_page_token: user_start_page_token,
+          user_changes_page_token: user_changes_page_token(checkpoint),
           run_id: run_id,
-          full_sync_finished: true,
-          pdf_backfill_version: SyncCredential.pdf_access?(credential) ? SyncCredential::PDF_BACKFILL_VERSION : 0,
+          pdf_backfill_version: SyncCredential::PDF_BACKFILL_VERSION,
           metadata: checkpoint.to_h.fetch("metadata", {})
         ),
         replace_context_documents: false

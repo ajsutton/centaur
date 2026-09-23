@@ -13,6 +13,7 @@ module GoogleDocs
     NAME_MAX_BYTES = 1_024
     USER_CORPUS = "user"
     FETCH_READ_TIMEOUT_SECONDS = 60
+    PDF_BACKFILL_VERSION = 1
 
     FILES_LIST_ENDPOINT = "https://www.googleapis.com/drive/v3/files"
     CHANGES_LIST_ENDPOINT = "https://www.googleapis.com/drive/v3/changes"
@@ -67,6 +68,16 @@ module GoogleDocs
         positive_int(ConsoleEnv["GOOGLE_DOCS_SYNC_CHUNK_CHARS"], 12_000)
       end
 
+      def pdf_access?(credential)
+        Array(credential.scopes).include?(DRIVE_READONLY_SCOPE)
+      end
+
+      def pdf_backfill_required?(credential, checkpoint)
+        metadata = checkpoint.to_h.fetch("metadata", {})
+        version = metadata.is_a?(Hash) ? metadata.fetch("pdf_backfill_version", 0) : 0
+        pdf_access?(credential) && version.to_i < PDF_BACKFILL_VERSION
+      end
+
       def positive_int(value, default)
         parsed = value.to_i
         parsed.positive? ? parsed : default
@@ -91,10 +102,18 @@ module GoogleDocs
     end
 
     def list_user_files_page(page_token: nil)
+      list_files_page(mime_types: eligible_mime_types, page_token: page_token)
+    end
+
+    def list_user_pdfs_page(page_token: nil)
+      list_files_page(mime_types: [ PDF_MIME_TYPE ], page_token: page_token)
+    end
+
+    def list_files_page(mime_types:, page_token: nil)
       google_api(
         FILES_LIST_ENDPOINT,
         {
-          "q" => "(#{eligible_mime_types.map { |mime_type| "mimeType = '#{mime_type}'" }.join(' or ')}) " \
+          "q" => "(#{mime_types.map { |mime_type| "mimeType = '#{mime_type}'" }.join(' or ')}) " \
             "and trashed = false",
           "pageSize" => self.class.page_size,
           "fields" => "nextPageToken,files(#{FILE_FIELDS})",
@@ -217,7 +236,7 @@ module GoogleDocs
 
     def eligible_mime_types
       mime_types = [ GOOGLE_DOC_MIME_TYPE ]
-      mime_types << PDF_MIME_TYPE if Array(credential.scopes).include?(DRIVE_READONLY_SCOPE)
+      mime_types << PDF_MIME_TYPE if self.class.pdf_access?(credential)
       mime_types
     end
 

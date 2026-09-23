@@ -34,7 +34,8 @@ module GoogleDocs
           credential,
           user_changes_page_token: next_user_changes_page_token,
           run_id: run_id,
-          incremental_sync_finished: true
+          incremental_sync_finished: true,
+          metadata: checkpoint.to_h.fetch("metadata", {})
         )
         break
       end

@@ -85,9 +85,18 @@ module GoogleDocs
       assert_enqueued_with(job: InitialSyncJob, args: [ credential.id ])
 
       clear_enqueued_jobs
-      api_client.checkpoint = checkpoint_for(credential, user_changes_page_token: "change-200")
+      api_client.checkpoint = checkpoint_for(
+        credential,
+        user_changes_page_token: "change-200",
+        pdf_backfill_version: SyncCredential::PDF_BACKFILL_VERSION
+      )
       CentaurApiClient.stub(:new, api_client) { PollSyncJob.perform_now(app.slug) }
       assert_enqueued_with(job: IncrementalSyncJob, args: [ credential.id ])
+
+      clear_enqueued_jobs
+      api_client.checkpoint["metadata"]["pdf_backfill_version"] = 0
+      CentaurApiClient.stub(:new, api_client) { PollSyncJob.perform_now(app.slug) }
+      assert_enqueued_with(job: PdfBackfillJob, args: [ credential.id ])
     end
 
     test "sync kill switch prevents polling and queued ETL work" do
@@ -159,7 +168,8 @@ module GoogleDocs
       )
       checkpoint = completion.fetch(:checkpoint)
       assert_equal "change-100", checkpoint[:changes_page_token]
-      assert_equal({}, checkpoint[:metadata])
+      assert_equal SyncCredential::PDF_BACKFILL_VERSION,
+        checkpoint.dig(:metadata, "pdf_backfill_version")
       assert checkpoint[:last_full_sync_at].present?
       assert_enqueued_with(job: FetchDocumentJob, args: [ credential.id, first_file ])
       assert_enqueued_with(job: FetchDocumentJob, args: [ credential.id, second_file ])
@@ -207,6 +217,70 @@ module GoogleDocs
       assert_enqueued_with(job: InitialSyncJob, args: [ credential.id ])
     end
 
+    test "PDF backfill crawls only PDFs and preserves the incremental checkpoint" do
+      credential = create_credential
+      api_client = FakeApiClient.new(
+        checkpoint: checkpoint_for(
+          credential,
+          user_changes_page_token: "change-100",
+          pdf_backfill_version: 0
+        )
+      )
+      api_client.checkpoint["metadata"]["existing"] = "keep"
+      first_pdf = google_pdf
+      second_pdf = google_pdf("pdf-456")
+      page_tokens = []
+      google_http = lambda do |endpoint:, params:, **|
+        assert_equal SyncCredential::FILES_LIST_ENDPOINT, endpoint
+        assert_includes params["q"], SyncCredential::PDF_MIME_TYPE
+        refute_includes params["q"], SyncCredential::GOOGLE_DOC_MIME_TYPE
+        page_tokens << params["pageToken"]
+        if params["pageToken"]
+          { "files" => [ second_pdf ] }
+        else
+          { "files" => [ first_pdf ], "nextPageToken" => "pdfs-2" }
+        end
+      end
+
+      with_clients(api_client, google_http) do
+        PdfBackfillJob.perform_now(credential.id)
+      end
+
+      assert_equal [ nil, "pdfs-2" ], page_tokens
+      assert_equal 3, api_client.batches.length
+      assert_equal [ "pdf-123" ], api_client.batches.first[:files].pluck(:file_id)
+      assert_equal "pdf_backfill", api_client.batches.first.dig(:run, :mode)
+      assert_equal [ "pdf-456" ], api_client.batches.second[:files].pluck(:file_id)
+      completion = api_client.batches.third
+      refute completion.key?(:observation_sweeps)
+      assert_equal "change-100", completion.dig(:checkpoint, :changes_page_token)
+      assert_equal SyncCredential::PDF_BACKFILL_VERSION,
+        completion.dig(:checkpoint, :metadata, "pdf_backfill_version")
+      assert_equal "keep", completion.dig(:checkpoint, :metadata, "existing")
+      assert_enqueued_with(job: FetchDocumentJob, args: [ credential.id, first_pdf ])
+      assert_enqueued_with(job: FetchDocumentJob, args: [ credential.id, second_pdf ])
+      assert_enqueued_with(job: IncrementalSyncJob, args: [ credential.id ])
+    end
+
+    test "completed PDF backfill is a no-op and resumes incremental sync" do
+      credential = create_credential
+      api_client = FakeApiClient.new(
+        checkpoint: checkpoint_for(
+          credential,
+          user_changes_page_token: "change-100",
+          pdf_backfill_version: SyncCredential::PDF_BACKFILL_VERSION
+        )
+      )
+      google_http = ->(**) { flunk "completed PDF backfill should not call Google" }
+
+      with_clients(api_client, google_http) do
+        PdfBackfillJob.perform_now(credential.id)
+      end
+
+      assert_empty api_client.batches
+      assert_enqueued_with(job: IncrementalSyncJob, args: [ credential.id ])
+    end
+
     test "incremental sync drains all pages before advancing its user checkpoint" do
       credential = create_credential
       api_client = FakeApiClient.new(
@@ -248,6 +322,8 @@ module GoogleDocs
       refute api_client.batches.second.key?(:checkpoint)
       checkpoint = api_client.batches.last.fetch(:checkpoint)
       assert_equal "change-200", checkpoint[:changes_page_token]
+      assert_equal SyncCredential::PDF_BACKFILL_VERSION,
+        checkpoint.dig(:metadata, "pdf_backfill_version")
       assert checkpoint[:last_incremental_sync_at].present?
       assert_enqueued_with(job: FetchDocumentJob, args: [ credential.id, file ])
     end
@@ -341,9 +417,11 @@ module GoogleDocs
     test "credential crawler jobs block conflicts for the full crawl" do
       assert_equal "google_docs", InitialSyncJob.queue_name
       assert_equal InitialSyncJob.queue_name, IncrementalSyncJob.queue_name
+      assert_equal InitialSyncJob.queue_name, PdfBackfillJob.queue_name
       assert_equal InitialSyncJob.queue_name, FetchDocumentJob.queue_name
       assert_equal "GoogleDocsCredentialSync", InitialSyncJob.concurrency_group
       assert_equal InitialSyncJob.concurrency_group, IncrementalSyncJob.concurrency_group
+      assert_equal InitialSyncJob.concurrency_group, PdfBackfillJob.concurrency_group
       assert_equal :block, InitialSyncJob.concurrency_on_conflict
       assert_equal 1.hour, InitialSyncJob.concurrency_duration
     end
@@ -366,12 +444,20 @@ module GoogleDocs
       SyncCredential.google_api_http = previous_http
     end
 
-    def checkpoint_for(credential, user_changes_page_token:)
+    def checkpoint_for(credential, user_changes_page_token:, pdf_backfill_version: SyncCredential::PDF_BACKFILL_VERSION)
       {
         "broker_credential_id" => credential.oid,
         "changes_page_token" => user_changes_page_token,
-        "metadata" => {}
+        "metadata" => { "pdf_backfill_version" => pdf_backfill_version }
       }
+    end
+
+    def google_pdf(id = "pdf-123")
+      google_doc(id).merge(
+        "name" => "Board Pack.pdf",
+        "mimeType" => SyncCredential::PDF_MIME_TYPE,
+        "webViewLink" => "https://drive.google.com/file/d/#{id}/view"
+      )
     end
 
     def google_doc(id = "doc-123")
