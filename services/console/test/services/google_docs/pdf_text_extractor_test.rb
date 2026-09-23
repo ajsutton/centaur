@@ -1,18 +1,32 @@
 require "test_helper"
+require "tempfile"
 
 module GoogleDocs
   class PdfTextExtractorTest < ActiveSupport::TestCase
     test "extracts embedded text without OCR" do
-      assert_includes PdfTextExtractor.extract(pdf_with_text("Quarterly results")), "Quarterly results"
+      with_pdf(pdf_with_text("Quarterly results")) do |path|
+        assert_includes PdfTextExtractor.extract(path), "Quarterly results"
+      end
     end
 
     test "rejects malformed PDFs" do
-      assert_raises(PdfTextExtractor::Error) do
-        PdfTextExtractor.extract("not a pdf")
+      with_pdf("not a pdf") do |path|
+        assert_raises(PdfTextExtractor::Error) do
+          PdfTextExtractor.extract(path)
+        end
       end
     end
 
     private
+
+    def with_pdf(contents)
+      Tempfile.create([ "pdf-text-extractor-test-", ".pdf" ]) do |file|
+        file.binmode
+        file.write(contents)
+        file.flush
+        yield file.path
+      end
+    end
 
     def pdf_with_text(text)
       objects = [

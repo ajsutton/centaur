@@ -228,8 +228,10 @@ module GoogleDocs
         downloaded_pdf
       end
       extracted_text = "x" * (GoogleDocs::SyncCredential.chunk_chars + 1)
-      extractor = lambda do |bytes|
-        assert_same downloaded_pdf, bytes
+      temporary_path = nil
+      extractor = lambda do |path|
+        temporary_path = path
+        assert_equal downloaded_pdf, File.binread(path)
         extracted_text
       end
       sync = GoogleDocs::SyncCredential.new(
@@ -246,6 +248,7 @@ module GoogleDocs
       assert sync.eligible_file?(file)
       batch = sync.document_batch(file)
 
+      refute File.exist?(temporary_path)
       assert_equal extracted_text, batch[:contents].first[:text_content]
       assert_equal GoogleDocs::SyncCredential::PDF_MIME_TYPE, batch[:contents].first[:export_mime_type]
       assert_equal 2, batch[:context_documents].length
@@ -253,6 +256,28 @@ module GoogleDocs
       assert_equal "google_docs:pdf-123:chunk-0001", batch[:context_documents].second[:document_id]
       assert_equal GoogleDocs::SyncCredential::PDF_MIME_TYPE, batch[:context_documents].first[:mime_type]
       assert_equal({ source: "google_docs" }, batch[:context_documents].first[:metadata])
+    end
+
+    test "rejects PDFs over the configured size limit before extraction" do
+      credential.update!(scopes: [ GoogleDocs::SyncCredential::DRIVE_READONLY_SCOPE ])
+      extractor = ->(*) { flunk "oversized PDF should not be extracted" }
+      sync = GoogleDocs::SyncCredential.new(
+        credential,
+        google_api_http: ->(**) { "123456" },
+        pdf_text_extractor: extractor,
+        max_pdf_bytes: 5
+      )
+      file = google_doc.merge(
+        "id" => "pdf-123",
+        "name" => "Board Pack.pdf",
+        "mimeType" => GoogleDocs::SyncCredential::PDF_MIME_TYPE
+      )
+
+      error = assert_raises(GoogleDocs::SyncCredential::PdfTooLargeError) do
+        sync.document_batch(file)
+      end
+
+      assert_equal "PDF exceeds the 50 MB indexing limit", error.message
     end
 
     test "lists PDFs when the credential grants Drive content access" do

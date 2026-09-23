@@ -1,6 +1,9 @@
 require "cgi"
 require "digest"
 require "json"
+require "net/http"
+require "tempfile"
+require "uri"
 
 module GoogleDocs
   class SyncCredential
@@ -14,6 +17,7 @@ module GoogleDocs
     USER_CORPUS = "user"
     FETCH_READ_TIMEOUT_SECONDS = 60
     PDF_BACKFILL_VERSION = 1
+    MAX_PDF_BYTES = 50 * 1024 * 1024
 
     FILES_LIST_ENDPOINT = "https://www.googleapis.com/drive/v3/files"
     CHANGES_LIST_ENDPOINT = "https://www.googleapis.com/drive/v3/changes"
@@ -28,6 +32,7 @@ module GoogleDocs
 
     class GoogleApiError < StandardError; end
     class InvalidPageTokenError < GoogleApiError; end
+    class PdfTooLargeError < StandardError; end
 
     NETWORK_ERRORS = [
       EOFError,
@@ -86,10 +91,11 @@ module GoogleDocs
 
     attr_reader :credential
 
-    def initialize(credential, google_api_http: nil, pdf_text_extractor: nil)
+    def initialize(credential, google_api_http: nil, pdf_text_extractor: nil, max_pdf_bytes: MAX_PDF_BYTES)
       @credential = credential
       @google_api_http = google_api_http || self.class.google_api_http
       @pdf_text_extractor = pdf_text_extractor || GoogleDocs::PdfTextExtractor.method(:extract)
+      @max_pdf_bytes = max_pdf_bytes
     end
 
     def user_start_page_token
@@ -241,12 +247,16 @@ module GoogleDocs
     end
 
     def pdf_text(file)
-      bytes = google_download(
-        "#{FILES_LIST_ENDPOINT}/#{CGI.escape(file.fetch('id'))}",
-        "alt" => "media",
-        "supportsAllDrives" => "true"
-      )
-      @pdf_text_extractor.call(bytes).to_s
+      Tempfile.create([ "google-drive-pdf-", ".pdf" ], binmode: true) do |tempfile|
+        google_download(
+          "#{FILES_LIST_ENDPOINT}/#{CGI.escape(file.fetch('id'))}",
+          tempfile,
+          "alt" => "media",
+          "supportsAllDrives" => "true"
+        )
+        tempfile.flush
+        @pdf_text_extractor.call(tempfile.path).to_s
+      end
     rescue GoogleDocs::PdfTextExtractor::Error => error
       raise GoogleApiError, error.message
     end
@@ -339,15 +349,19 @@ module GoogleDocs
       raise GoogleApiError, "Google API network request failed: #{error.class}"
     end
 
-    def google_download(endpoint, params)
-      response = if @google_api_http
-        @google_api_http.call(endpoint: endpoint, params: params, access_token: credential.access_token)
-      else
-        net_http_download(endpoint, params)
-      end
-      return response if response.is_a?(String)
+    def google_download(endpoint, destination, params)
+      if @google_api_http
+        response = @google_api_http.call(
+          endpoint: endpoint,
+          params: params,
+          access_token: credential.access_token
+        )
+        raise GoogleApiError, "Google API returned invalid file content" unless response.is_a?(String)
 
-      raise GoogleApiError, "Google API returned invalid file content"
+        write_pdf_chunk(destination, response, 0)
+      else
+        net_http_download(endpoint, destination, params)
+      end
     rescue *NETWORK_ERRORS => error
       raise GoogleApiError, "Google API network request failed: #{error.class}"
     end
@@ -376,15 +390,40 @@ module GoogleDocs
       raise GoogleApiError, "Google API returned invalid JSON"
     end
 
-    def net_http_download(endpoint, params)
-      response = HttpClient.new(read_timeout: FETCH_READ_TIMEOUT_SECONDS).get(
-        endpoint,
-        params: params,
-        headers: { "Authorization" => "Bearer #{credential.access_token}" }
-      )
-      return response.body if response.success?
+    def net_http_download(endpoint, destination, params)
+      uri = URI.parse(endpoint)
+      uri.query = URI.encode_www_form(params)
+      request = Net::HTTP::Get.new(uri)
+      request["Authorization"] = "Bearer #{credential.access_token}"
+      http = Net::HTTP.new(uri.host, uri.port)
+      http.use_ssl = uri.scheme == "https"
+      http.open_timeout = HttpClient::DEFAULT_OPEN_TIMEOUT
+      http.read_timeout = FETCH_READ_TIMEOUT_SECONDS
 
-      raise GoogleApiError, "Google API returned HTTP #{response.status}"
+      http.request(request) do |response|
+        status = response.code.to_i
+        raise GoogleApiError, "Google API returned HTTP #{status}" unless status.between?(200, 299)
+
+        content_length = response["Content-Length"].to_i
+        raise_pdf_too_large if content_length > @max_pdf_bytes
+
+        bytes_written = 0
+        response.read_body do |chunk|
+          bytes_written = write_pdf_chunk(destination, chunk, bytes_written)
+        end
+      end
+    end
+
+    def write_pdf_chunk(destination, chunk, bytes_written)
+      new_size = bytes_written + chunk.bytesize
+      raise_pdf_too_large if new_size > @max_pdf_bytes
+
+      destination.write(chunk)
+      new_size
+    end
+
+    def raise_pdf_too_large
+      raise PdfTooLargeError, "PDF exceeds the 50 MB indexing limit"
     end
 
     def invalid_page_token_response?(status, params)
