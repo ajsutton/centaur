@@ -72,7 +72,9 @@ module GoogleDocs
         file.write("#!#{RbConfig.ruby}\n#{body}\n")
         file.flush
         File.chmod(0o700, file.path)
-        yield file.path
+        path = file.path
+        file.close
+        yield path
       end
     end
   end
