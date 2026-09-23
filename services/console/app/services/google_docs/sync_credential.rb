@@ -8,6 +8,7 @@ module GoogleDocs
     DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
     DOCS_READONLY_SCOPE = "https://www.googleapis.com/auth/documents.readonly"
     GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document"
+    PDF_MIME_TYPE = "application/pdf"
     EXPORT_MIME_TYPE = "text/plain"
     NAME_MAX_BYTES = 1_024
     USER_CORPUS = "user"
@@ -74,9 +75,10 @@ module GoogleDocs
 
     attr_reader :credential
 
-    def initialize(credential, google_api_http: nil)
+    def initialize(credential, google_api_http: nil, pdf_text_extractor: nil)
       @credential = credential
       @google_api_http = google_api_http || self.class.google_api_http
+      @pdf_text_extractor = pdf_text_extractor || GoogleDocs::PdfTextExtractor.method(:extract)
     end
 
     def user_start_page_token
@@ -92,7 +94,8 @@ module GoogleDocs
       google_api(
         FILES_LIST_ENDPOINT,
         {
-          "q" => "mimeType = '#{GOOGLE_DOC_MIME_TYPE}' and trashed = false",
+          "q" => "(#{eligible_mime_types.map { |mime_type| "mimeType = '#{mime_type}'" }.join(' or ')}) " \
+            "and trashed = false",
           "pageSize" => self.class.page_size,
           "fields" => "nextPageToken,files(#{FILE_FIELDS})",
           "corpora" => USER_CORPUS,
@@ -122,7 +125,7 @@ module GoogleDocs
 
     def eligible_file?(file)
       file.is_a?(Hash) && file["id"].present? &&
-        file["mimeType"] == GOOGLE_DOC_MIME_TYPE && file["trashed"] != true
+        eligible_mime_types.include?(file["mimeType"]) && file["trashed"] != true
     end
 
     def file_payload(file, run_id: nil)
@@ -179,21 +182,23 @@ module GoogleDocs
     end
 
     def document_batch(file)
-      doc = google_api(
-        "#{DOCS_GET_ENDPOINT}/#{CGI.escape(file.fetch('id'))}",
-        "includeTabsContent" => "true"
-      )
-      text = docs_text_from_document(doc)
-      title = doc["title"].presence || file["name"].to_s
-      exported_at = Time.current.iso8601
+      title, text, export_mime_type = if file["mimeType"] == PDF_MIME_TYPE
+        [ file["name"].to_s, pdf_text(file), PDF_MIME_TYPE ]
+      else
+        doc = google_api(
+          "#{DOCS_GET_ENDPOINT}/#{CGI.escape(file.fetch('id'))}",
+          "includeTabsContent" => "true"
+        )
+        [ doc["title"].presence || file["name"].to_s, docs_text_from_document(doc), EXPORT_MIME_TYPE ]
+      end
       contents = [
         {
           file_id: file.fetch("id"),
           title: title,
           text_content: text,
           text_hash: content_hash(text),
-          export_mime_type: EXPORT_MIME_TYPE,
-          exported_at: exported_at,
+          export_mime_type: export_mime_type,
+          exported_at: Time.current.iso8601,
           source_modified_at: file["modifiedTime"],
           source_version: source_version(file)
         }
@@ -209,6 +214,23 @@ module GoogleDocs
     end
 
     private
+
+    def eligible_mime_types
+      mime_types = [ GOOGLE_DOC_MIME_TYPE ]
+      mime_types << PDF_MIME_TYPE if Array(credential.scopes).include?(DRIVE_READONLY_SCOPE)
+      mime_types
+    end
+
+    def pdf_text(file)
+      bytes = google_download(
+        "#{FILES_LIST_ENDPOINT}/#{CGI.escape(file.fetch('id'))}",
+        "alt" => "media",
+        "supportsAllDrives" => "true"
+      )
+      @pdf_text_extractor.call(bytes).to_s
+    rescue GoogleDocs::PdfTextExtractor::Error => error
+      raise GoogleApiError, error.message
+    end
 
     def truncated_name(file)
       name = file["name"].to_s
@@ -298,6 +320,19 @@ module GoogleDocs
       raise GoogleApiError, "Google API network request failed: #{error.class}"
     end
 
+    def google_download(endpoint, params)
+      response = if @google_api_http
+        @google_api_http.call(endpoint: endpoint, params: params, access_token: credential.access_token)
+      else
+        net_http_download(endpoint, params)
+      end
+      return response if response.is_a?(String)
+
+      raise GoogleApiError, "Google API returned invalid file content"
+    rescue *NETWORK_ERRORS => error
+      raise GoogleApiError, "Google API network request failed: #{error.class}"
+    end
+
     def net_http_get(endpoint, params)
       response = HttpClient.new(read_timeout: FETCH_READ_TIMEOUT_SECONDS).get(
         endpoint,
@@ -320,6 +355,17 @@ module GoogleDocs
       end
 
       raise GoogleApiError, "Google API returned invalid JSON"
+    end
+
+    def net_http_download(endpoint, params)
+      response = HttpClient.new(read_timeout: FETCH_READ_TIMEOUT_SECONDS).get(
+        endpoint,
+        params: params,
+        headers: { "Authorization" => "Bearer #{credential.access_token}" }
+      )
+      return response.body if response.success?
+
+      raise GoogleApiError, "Google API returned HTTP #{response.status}"
     end
 
     def invalid_page_token_response?(status, params)

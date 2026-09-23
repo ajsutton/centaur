@@ -119,6 +119,8 @@ module GoogleDocs
       assert_equal "true", files_params["supportsAllDrives"]
       refute_includes files_params, "driveId"
       assert_includes files_params["q"], "trashed = false"
+      assert_includes files_params["q"], GoogleDocs::SyncCredential::GOOGLE_DOC_MIME_TYPE
+      refute_includes files_params["q"], GoogleDocs::SyncCredential::PDF_MIME_TYPE
       changes_params = calls.find { |endpoint, _| endpoint == GoogleDocs::SyncCredential::CHANGES_LIST_ENDPOINT }.last
       assert_equal "change-100", changes_params["pageToken"]
       assert_equal "true", changes_params["includeRemoved"]
@@ -214,6 +216,58 @@ module GoogleDocs
       assert_equal "google_docs:doc-123:chunk-0000", batch[:context_documents].first[:document_id]
       assert_equal({ source: "google_docs" }, batch[:context_documents].first[:metadata])
       refute_includes batch[:context_documents].first[:metadata], :broker_credential_id
+    end
+
+    test "downloads, extracts, and chunks Drive PDFs" do
+      credential.update!(scopes: [ GoogleDocs::SyncCredential::DRIVE_READONLY_SCOPE ])
+      downloaded_pdf = "%PDF fixture bytes".b
+      google_http = lambda do |endpoint:, params:, access_token:|
+        assert_equal "#{GoogleDocs::SyncCredential::FILES_LIST_ENDPOINT}/pdf-123", endpoint
+        assert_equal({ "alt" => "media", "supportsAllDrives" => "true" }, params)
+        assert_equal "ya29.live", access_token
+        downloaded_pdf
+      end
+      extracted_text = "x" * (GoogleDocs::SyncCredential.chunk_chars + 1)
+      extractor = lambda do |bytes|
+        assert_same downloaded_pdf, bytes
+        extracted_text
+      end
+      sync = GoogleDocs::SyncCredential.new(
+        credential,
+        google_api_http: google_http,
+        pdf_text_extractor: extractor
+      )
+      file = google_doc.merge(
+        "id" => "pdf-123",
+        "name" => "Board Pack.pdf",
+        "mimeType" => GoogleDocs::SyncCredential::PDF_MIME_TYPE
+      )
+
+      assert sync.eligible_file?(file)
+      batch = sync.document_batch(file)
+
+      assert_equal extracted_text, batch[:contents].first[:text_content]
+      assert_equal GoogleDocs::SyncCredential::PDF_MIME_TYPE, batch[:contents].first[:export_mime_type]
+      assert_equal 2, batch[:context_documents].length
+      assert_equal "google_docs:pdf-123:chunk-0000", batch[:context_documents].first[:document_id]
+      assert_equal "google_docs:pdf-123:chunk-0001", batch[:context_documents].second[:document_id]
+      assert_equal GoogleDocs::SyncCredential::PDF_MIME_TYPE, batch[:context_documents].first[:mime_type]
+      assert_equal({ source: "google_docs" }, batch[:context_documents].first[:metadata])
+    end
+
+    test "lists PDFs when the credential grants Drive content access" do
+      credential.update!(scopes: [ GoogleDocs::SyncCredential::DRIVE_READONLY_SCOPE ])
+      requested_params = nil
+      google_http = lambda do |endpoint:, params:, **|
+        assert_equal GoogleDocs::SyncCredential::FILES_LIST_ENDPOINT, endpoint
+        requested_params = params
+        { "files" => [] }
+      end
+
+      GoogleDocs::SyncCredential.new(credential, google_api_http: google_http).list_user_files_page
+
+      assert_includes requested_params["q"], GoogleDocs::SyncCredential::GOOGLE_DOC_MIME_TYPE
+      assert_includes requested_params["q"], GoogleDocs::SyncCredential::PDF_MIME_TYPE
     end
 
     test "truncates names sent to the sync API while preserving the raw payload" do
