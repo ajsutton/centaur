@@ -24,7 +24,8 @@ module GoogleDocs
           .fetch("checkpoint")
         job_class = if !SyncJob.user_changes_page_token(checkpoint)
           InitialSyncJob
-        elsif SyncCredential.pdf_backfill_required?(credential, checkpoint)
+        elsif SyncCredential.pdf_backfill_reset_required?(checkpoint) ||
+            SyncCredential.pdf_backfill_required?(credential, checkpoint)
           PdfBackfillJob
         else
           IncrementalSyncJob

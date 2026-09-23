@@ -32,7 +32,9 @@ module GoogleDocs
 
     class GoogleApiError < StandardError; end
     class InvalidPageTokenError < GoogleApiError; end
-    class PdfTooLargeError < StandardError; end
+    class PdfContentError < StandardError; end
+    class PdfTooLargeError < PdfContentError; end
+    class PdfExtractionError < PdfContentError; end
 
     NETWORK_ERRORS = [
       EOFError,
@@ -77,10 +79,18 @@ module GoogleDocs
         Array(credential.scopes).include?(DRIVE_READONLY_SCOPE)
       end
 
-      def pdf_backfill_required?(credential, checkpoint)
+      def pdf_backfill_version(checkpoint)
         metadata = checkpoint.to_h.fetch("metadata", {})
-        version = metadata.is_a?(Hash) ? metadata.fetch("pdf_backfill_version", 0) : 0
-        pdf_access?(credential) && version.to_i < PDF_BACKFILL_VERSION
+        metadata.is_a?(Hash) ? metadata.fetch("pdf_backfill_version", 0).to_i : 0
+      end
+
+      def pdf_backfill_required?(credential, checkpoint)
+        GoogleDocs::Config.pdf_indexing_enabled? && pdf_access?(credential) &&
+          pdf_backfill_version(checkpoint) < PDF_BACKFILL_VERSION
+      end
+
+      def pdf_backfill_reset_required?(checkpoint)
+        !GoogleDocs::Config.pdf_indexing_enabled? && pdf_backfill_version(checkpoint).positive?
       end
 
       def positive_int(value, default)
@@ -238,11 +248,33 @@ module GoogleDocs
       }
     end
 
+    def content_failure_batch(file, error)
+      {
+        contents: [
+          {
+            file_id: file.fetch("id"),
+            title: file["name"].to_s,
+            text_content: "",
+            text_hash: content_hash(""),
+            export_mime_type: file["mimeType"].to_s,
+            exported_at: Time.current.iso8601,
+            source_modified_at: file["modifiedTime"],
+            source_version: source_version(file),
+            last_error: "#{error.class}: #{error.message}".byteslice(0, 1_000)
+          }
+        ],
+        context_documents: [],
+        replace_context_documents: true
+      }
+    end
+
     private
 
     def eligible_mime_types
       mime_types = [ GOOGLE_DOC_MIME_TYPE ]
-      mime_types << PDF_MIME_TYPE if self.class.pdf_access?(credential)
+      if GoogleDocs::Config.pdf_indexing_enabled? && self.class.pdf_access?(credential)
+        mime_types << PDF_MIME_TYPE
+      end
       mime_types
     end
 
@@ -258,7 +290,7 @@ module GoogleDocs
         @pdf_text_extractor.call(tempfile.path).to_s
       end
     rescue GoogleDocs::PdfTextExtractor::Error => error
-      raise GoogleApiError, error.message
+      raise PdfExtractionError, error.message
     end
 
     def truncated_name(file)
@@ -318,7 +350,7 @@ module GoogleDocs
     end
 
     def chunks_for(text)
-      return [ "" ] if text.blank?
+      return [] if text.blank?
 
       text.scan(/.{1,#{self.class.chunk_chars}}/m)
     end
@@ -376,14 +408,14 @@ module GoogleDocs
       return parsed if response.success?
 
       message = parsed.dig("error", "message") if parsed.is_a?(Hash)
-      error_class = if invalid_page_token_response?(response.status, params)
+      error_class = if invalid_page_token_response?(endpoint, response.status, params)
         InvalidPageTokenError
       else
         GoogleApiError
       end
       raise error_class, message.presence || "Google API returned HTTP #{response.status}"
     rescue JSON::ParserError
-      if invalid_page_token_response?(response&.status, params)
+      if invalid_page_token_response?(endpoint, response&.status, params)
         raise InvalidPageTokenError, "Google API rejected the page token"
       end
 
@@ -426,8 +458,8 @@ module GoogleDocs
       raise PdfTooLargeError, "PDF exceeds the 50 MB indexing limit"
     end
 
-    def invalid_page_token_response?(status, params)
-      params["pageToken"].present? && [ 400, 404, 410 ].include?(status)
+    def invalid_page_token_response?(endpoint, status, params)
+      endpoint == CHANGES_LIST_ENDPOINT && params["pageToken"].present? && [ 400, 404, 410 ].include?(status)
     end
   end
 end

@@ -9,6 +9,25 @@ module GoogleDocs
       end
     end
 
+    test "sanitizes NUL bytes from extracted text" do
+      with_pdf(pdf_with_text("Quarterly\0results")) do |path|
+        extracted = PdfTextExtractor.extract(path)
+
+        refute_includes extracted, "\0"
+      end
+    end
+
+    test "enforces page and extracted-text limits" do
+      with_pdf(pdf_with_text("Quarterly results")) do |path|
+        assert_raises(PdfTextExtractor::Error) do
+          PdfTextExtractor.extract(path, max_pages: 0)
+        end
+        assert_raises(PdfTextExtractor::Error) do
+          PdfTextExtractor.extract(path, max_text_chars: 5)
+        end
+      end
+    end
+
     test "rejects malformed PDFs" do
       with_pdf("not a pdf") do |path|
         assert_raises(PdfTextExtractor::Error) do

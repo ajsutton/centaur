@@ -7,6 +7,11 @@ module GoogleDocs
         GoogleDocs::InitialSyncJob.perform_later(credential.id)
         return
       end
+      unless Config.pdf_indexing_enabled?
+        reset_backfill_marker(credential, checkpoint)
+        GoogleDocs::IncrementalSyncJob.perform_later(credential.id)
+        return
+      end
       unless SyncCredential.pdf_backfill_required?(credential, checkpoint)
         GoogleDocs::IncrementalSyncJob.perform_later(credential.id)
         return
@@ -54,6 +59,21 @@ module GoogleDocs
         replace_context_documents: false
       )
       GoogleDocs::IncrementalSyncJob.perform_later(credential.id)
+    end
+
+    def reset_backfill_marker(credential, checkpoint)
+      return unless SyncCredential.pdf_backfill_reset_required?(checkpoint)
+
+      api_client.ingest_google_docs_sync_batch(
+        checkpoint: checkpoint_payload(
+          credential,
+          user_changes_page_token: user_changes_page_token(checkpoint),
+          run_id: checkpoint["last_run_id"],
+          pdf_backfill_version: 0,
+          metadata: checkpoint.to_h.fetch("metadata", {})
+        ),
+        replace_context_documents: false
+      )
     end
   end
 end
