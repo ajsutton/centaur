@@ -4,8 +4,9 @@ import json
 from unittest.mock import MagicMock
 
 import httpx
-from pangram import cli
 from typer.testing import CliRunner
+
+from pangram import cli
 
 
 def test_detect_outputs_the_completed_result(monkeypatch):

@@ -4,6 +4,7 @@ import json
 from unittest.mock import patch
 
 import httpx
+
 from pangram.client import PangramClient
 
 
